@@ -4,11 +4,11 @@
 #include <time.h>   // Para time() (semente)
 #include <errno.h>  // Para códigos de erro (opcional, mas bom)
 
-// Variáveis globais compartilhadas entre as threads
-long long total_tosses;
-long long total_in_circle = 0; // Contador global de pontos dentro do círculo
-int num_threads;
-pthread_mutex_t mutex; // Mutex para proteger o acesso a total_in_circle
+// Estrutura para passar como argumento na criação da thread
+typedef struct{
+    long long tosses;
+    long long *results;
+} ThreadArgs;    
 
 // Função para calcular a diferença de tempo em segundos
 double get_elapsed_time(struct timespec *start, struct timespec *end){
@@ -20,7 +20,8 @@ double get_elapsed_time(struct timespec *start, struct timespec *end){
 
 // Função que cada thread executará
 void* monte_carlo_thread(void* arg) {
-    long long tosses_per_thread = *(long long*)arg; // Recebe o nº de lançamentos para esta thread
+    ThreadArgs *args = (ThreadArgs *)arg;
+    long long tosses_per_thread = args->tosses;
     long long local_in_circle = 0; // Contador local para esta thread
     unsigned int thread_seed; // Semente para gerador (embora rand() use estado global)
     double x, y;
@@ -43,21 +44,17 @@ void* monte_carlo_thread(void* arg) {
         }
     }
 
-    // --- Seção Crítica ---
-    // Bloqueia o mutex antes de atualizar o contador global compartilhado
-    pthread_mutex_lock(&mutex);
-
-    total_in_circle += local_in_circle; // Adiciona a contagem local ao total global
-
-    // Libera o mutex após a atualização
-    pthread_mutex_unlock(&mutex);
-    // --- Fim da Seção Crítica ---
-
+    
+    *(args->results) = local_in_circle;
     return NULL;
 }
 
 int main(int argc, char *argv[]) {
 
+
+    long long total_tosses, total_in_circle;
+    int num_threads;
+	
     struct timespec start_total_time, end_total_time;
     struct timespec start_partial_time, end_partial_time;
     double total_elapsed_time, partial_elapsed_time ;
@@ -67,17 +64,20 @@ int main(int argc, char *argv[]) {
     long long tosses_for_each_thread;
     int ret;
 
-    // Obter número de threads e lançamentos totais (exemplo: da linha de comando)
-    if (argc != 3) {
-        fprintf(stderr, "Uso: %s <numero de threads> <numero total de lançamentos>\n", argv[0]);
-        return 1;
-    }
-
     // --- INÍCIO DA MEDIÇÃO DE TEMPO TOTAL ---
     clock_gettime(CLOCK_MONOTONIC, &start_total_time);
 
     num_threads = atoi(argv[1]);
     total_tosses = strtoll(argv[2], NULL, 10); // Usar strtoll para números grandes
+
+    ThreadArgs *args_array = malloc(num_threads * sizeof(ThreadArgs));
+    long long *results = malloc(num_threads * sizeof(long long));
+
+    // Obter número de threads e lançamentos totais (exemplo: da linha de comando)
+    if (argc != 3) {
+        fprintf(stderr, "Uso: %s <numero de threads> <numero total de lançamentos>\n", argv[0]);
+        return 1;
+    }
 
     if (num_threads <= 0 || total_tosses <= 0) {
         fprintf(stderr, "Número de threads e lançamentos devem ser positivos.\n");
@@ -96,29 +96,19 @@ int main(int argc, char *argv[]) {
     tosses_for_each_thread = total_tosses / num_threads;
     printf("Calculando com %d threads, %lld lançamentos por thread...\n", num_threads, tosses_for_each_thread);
 
-    // 2. Inicializar o mutex
-    ret = pthread_mutex_init(&mutex, NULL);
-     if (ret != 0) {
-        errno = ret;
-        perror("pthread_mutex_init falhou");
-        free(thread_handles);
-        return 1;
-    }
-
-
     // --- INÍCIO DA MEDIÇÃO DE TEMPO PARCIAL ---
     clock_gettime(CLOCK_MONOTONIC, &start_partial_time);
 
     // 3. Criar as threads
     for (i = 0; i < num_threads; ++i) {
         // Passa o número de lançamentos para a thread como argumento
-        ret = pthread_create(&thread_handles[i], NULL, monte_carlo_thread, &tosses_for_each_thread);
+	args_array[i].tosses = tosses_for_each_thread;
+	args_array[i].results = &results[i];
+        ret = pthread_create(&thread_handles[i], NULL, monte_carlo_thread, &args_array[i]);
          if (ret != 0) {
             errno = ret;
             perror("pthread_create falhou");
-            // Lidar com erro (talvez cancelar threads já criadas)
             free(thread_handles);
-            pthread_mutex_destroy(&mutex);
             return 1;
         }
     }
@@ -126,6 +116,7 @@ int main(int argc, char *argv[]) {
     // 4. Esperar (Join) todas as threads terminarem
     for (i = 0; i < num_threads; ++i) {
         pthread_join(thread_handles[i], NULL);
+	total_in_circle += results[i];
     }
 
     // 6. Calcular e imprimir a estimativa final de Pi
@@ -133,9 +124,6 @@ int main(int argc, char *argv[]) {
 
     // --- FIM DA MEDIÇÃO DE TEMPO PARCIAL --- 
     clock_gettime(CLOCK_MONOTONIC, &end_partial_time);
-
-    // 5. Destruir o mutex
-    pthread_mutex_destroy(&mutex);
 
     // Liberar memória alocada para os handles
     free(thread_handles);
